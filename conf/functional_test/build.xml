@@ -1,0 +1,316 @@
+<?xml version="1.0"?>
+
+<project name="ant-jmeter" default="all">
+    <description>
+        此脚本用来运行JMeter做性能测试，并输出相关报告和图表
+        推荐配合Jenkins使用，也可直接命令行运行
+
+        前提：
+        1. 服务器装好Ant和JMeter，设好相关环境变量
+        2. generate-report 依赖saxon包（解析XSLT 2.0），把这包从lib目录拷到JMeter的lib下
+        3. generate-chart 依赖antcontrib包（扩展Ant语法），把这包从lib目录拷到Ant的lib下
+
+        假设当前工作目录是此脚本所在目录
+        用法：
+        运行测试并生成HTML报告和图表：
+            ant -file build_in_jenkins.xml
+
+        只运行测试：
+            ant -file build_in_jenkins.xml run
+
+        只生成报告：
+            ant -file build_in_jenkins.xml generate-report
+
+        只生成图表：
+            ant -file build_in_jenkins.xml generate-chart
+
+        参考：http://www.testautomationguru.com/jmeter-continuous-performance-testing-part1/
+            http://www.programmerplanet.org/projects/jmeter-ant-task/
+
+        Keith Mo
+        2016-05-16
+    </description>
+    
+    <!-- 加载antcontrib包 -->
+    <taskdef resource="net/sf/antcontrib/antlib.xml"/>
+
+    <!-- 引用同目录下Ant的property文件 -->
+    <!-- Ant的property是一经定义不可改变，引用外部文件一定要放前面，保证此脚本里同名属性的值不会被使用 -->
+    <loadproperties srcFile="build_in_jenkins.properties" />
+
+    <!-- 定义属性 -->
+    <!-- 为了方便在shell脚本里赋值，不采用foo.bar的惯用命名方式 -->
+    <property environment="env"/>
+    <property name="jmeter_home" value="${env.JMETER_HOME}"/><!-- 系统需设好JMETER_HOME环境变量 -->
+    <property name="test_home" value="${basedir}/.."/>
+    <!-- JMeter测试计划文件相关 -->
+    <property name="testplan_dir" value="${test_home}/testplan/run_in_jenkins"/>
+    <property name="testplan_filename" value="test.jmx"/>
+    <!-- 存放测试用到的第三方库（如果有）的目录 -->
+    <property name="lib_dir" value="${test_home}/lib"/>
+    <!-- 存放外部脚本的目录，如测试用到的Ant/shell/Beanshell/Groovy/Python脚本等 -->
+    <property name="script_dir" value="${test_home}/script"/>
+    <!-- 存放JMeter properties文件的目录 -->
+    <property name="properties_dir" value="${test_home}/properties"/>
+    <!-- 运行测试后生成的文件相关 -->
+    <property name="output_dir" value="${test_home}/output"/>
+    <property name="resultlog_dir" value="${output_dir}/result_log"/>
+    <property name="resultlog_filename" value="result_log.jtl"/>
+    <property name="jmeterlog_dir" value="${output_dir}/jmeter_log"/>
+    <property name="jmeterlog_filename" value="jmeter.log"/>
+    <property name="chart_dir" value="${output_dir}/chart"/>
+    <!-- 生成HTML报告相关 -->
+    <property name="report_filename" value="report.html"/>
+    <property name="report_stylefile_path" value="${script_dir}/jmeter-results-report_21_http.xsl"/>
+    <property name="report_title" value="性能测试报告 - ${testplan_filename} @ ${app_server}"/>
+    <!-- 是否调用远程机器进行分布式压测 -->
+    <property name="run_remote" value="false"/>
+    <!-- 分布式压测相关设置 -->
+    <property name="environment" value="TEST"/>
+    <property name="test_machine_num" value="1"/>
+    <property name="test_machine_list" value="127.0.0.1"/> <!-- run_remote为true时这值才有效 -->
+    <!-- 具体测试相关，jmx文件里${__P(名字, 默认值)}定义 -->
+    <!-- 建议在properties文件/shell脚本/Jenkins定义同名属性，方便修改它们的值 -->
+    <!-- 改名/增加/删除时，下面jmeter任务里也要改 -->
+    <property name="thread" value="50"/>
+    <property name="rampup" value="1"/><!-- 秒 -->
+    <property name="duration" value="10"/><!-- 秒 -->
+    <property name="startup_delay" value="0"/><!-- 秒 -->
+    <property name="think_time" value="500"/><!-- 毫秒 -->
+
+    <property name="app_server" value="192.168.3.2"/>
+    <property name="app_server_port" value="80"/>
+    <property name="im_server" value="192.168.3.2"/>
+    <property name="im_server_port" value="8090"/>
+    <!-- JVM参数、监听器设置、测试计划文件里的具体设置请直接改下面jmeter任务里的设置 -->
+
+    <!-- 设classpath -->
+    <path id="jmeter.classpath">
+        <fileset dir="${jmeter_home}/extras" includes="ant-jmeter*.jar" />
+        <fileset dir="${lib_dir}" includes="*.jar" />
+    </path>
+    <path id="xslt.classpath"><!-- 需要处理XSLT的包才能把XML格式的测试结果文件转换成HTML报告 -->
+        <!-- 如果报告模板使用XSLT 2.0，saxon包解析 -->
+        <!-- 请确保已下载saxon包，放到自己指定的目录或JMeter的lib目录下 -->
+        <fileset dir="${lib_dir}" includes="saxon*.jar"/>
+        <fileset dir="${jmeter_home}/lib" includes="saxon*.jar"/>
+        <!-- 如果报告模板使用XSLT 1.0，自带的xalan包解析 -->
+        <!-- <fileset dir="${jmeter_home}/lib" includes="xalan*.jar"/> -->
+        <!-- <fileset dir="${jmeter_home}/lib" includes="serializer*.jar"/> -->
+    </path>
+
+    <!-- 设默认任务 -->
+    <target name="all" depends="run, generate-report, generate-chart"/>
+    
+    <!-- 删除旧的输出目录 -->
+    <target name="clean">
+        <delete dir="${resultlog_dir}" />
+        <delete dir="${jmeterlog_dir}" />
+        <delete dir="${chart_dir}" />
+    </target>
+
+    <!-- 运行测试前的准备工作 -->
+    <target name="pre-run" depends="clean">
+        <!-- 创建目录 -->
+        <mkdir dir="${resultlog_dir}"/>
+        <mkdir dir="${jmeterlog_dir}"/>
+
+        <!-- 把org.json包拷到JMETER_HOME/lib -->
+        <!-- （JMeter没自带json解析包，目前测试计划里的beanshell脚本用到这库） -->
+        <!--<copy file="${lib_dir}/json-20160212.jar" todir="${jmeter_home}/lib"/>-->
+
+        <!-- 如果test_machine_list设了远程机器的地址，由它直接传给JMeter的remote_hosts的话
+        即使run_remote设为false，通过Ant启动的JMeter还是会尝试接收远程机器回传的测试结果，收不到就报错
+        所以多绕个弯校验这2个值，赋值给新属性hosts
+
+        真正做压测时，run_remote应设为true，压力机启动jmeter-sever跟控制机连接
+        test_machine_list传 <ip地址>:<RMI端口>
+        即使压力机跟控制机是同一台都应这样设，避免坑
+        -->
+        <script language="javascript">
+            var runRemote = project.getProperty("run_remote");
+            var testMachineList = project.getProperty("test_machine_list");
+
+            if (!runRemote || "TRUE" != runRemote.toUpperCase()) {
+                // !runRemote表示runRemote的值为null, "", undefined, false, 0
+
+                project.setProperty("test_machine_num", "1");
+                project.setProperty("hosts", "127.0.0.1");
+            } else {
+                if (testMachineList.match(/(\d{1,3}(\.\d{1,3}){3}:\d{1,5},?)+/g)) {
+                    // 格式：192.168.xx.xx:1099,192.168.yy.yy:1099
+
+                    project.setProperty("hosts", testMachineList);
+                } else {
+                    project.setProperty("test_machine_num", "1");
+                    project.setProperty("hosts", "127.0.0.1");
+                }
+            }
+        </script>
+    </target>
+
+    <!-- 在console里显示环境变量 -->
+    <target name="info" depends="pre-run">
+        <echo>JMETER_HOME:    ${jmeter_home}</echo>
+        <echo>Test home:    ${test_home}</echo>
+        <echo>Test file name:    ${testplan_filename}</echo>
+        <echo>Output path:    ${output_dir}</echo>
+        <echo></echo>
+        <echo>Environment:    ${environment}</echo>
+        <echo>Servers:</echo>
+        <echo>    App server:    ${app_server}</echo>
+        <echo>    IM server:    ${im_server}</echo>
+        <echo></echo>
+        <echo>Number of test machine(s):    ${test_machine_num}</echo>
+        <echo>List of test machine(s):    ${hosts}</echo>
+        <echo>Thread count:    ${thread}</echo>
+        <echo>Ramp-up period:    ${rampup} s</echo>
+        <echo>Think time:    ${think_time} ms</echo>
+        <echo>Test duration:    ${duration} s</echo>
+    </target>
+    
+    <taskdef
+        name="jmeter"
+        classpathref="jmeter.classpath"
+        classname="org.programmerplanet.ant.taskdefs.jmeter.JMeterTask"
+    />
+
+    <!-- 运行JMeter测试 -->
+    <target name="run" depends="info">
+        <jmeter
+            jmeterhome="${jmeter_home}"
+            testplan="${testplan_dir}/${testplan_filename}"
+            resultlog="${resultlog_dir}/${resultlog_filename}"
+            jmeterlogfile="${jmeterlog_dir}/${jmeterlog_filename}"
+            jmeterproperties="${properties_dir}/user.properties"
+            runremote="${run_remote}"
+        >
+
+            <!-- JVM参数，看情况改 -->
+            <jvmarg value="-Xmx512m"/> 
+
+            <!-- 必须的jmeter.properties设置，输出html报告用到 -->
+            <property name="jmeter.save.saveservice.output_format" value="xml"/>
+            <property name="jmeter.save.saveservice.assertion_results" value="all"/>
+            <property name="jmeter.save.saveservice.bytes" value="true"/>
+            <property name="jmeter.save.saveservice.response_data.on_error" value="true"/>
+            
+            <!-- 更多jmeter.properties设置 -->
+            <!-- 自定义classpath-->
+            <property name="user.classpath" value="${lib_dir}:${script_dir}"/>
+            <!-- 确保Include Controller能用相对路径 -->
+            <!-- 路径要用/结尾，因为测试计划里都写相对路径（开头为./或什么也不加）-->
+            <property name="includecontroller.prefix" value="${testplan_dir}/"/>
+            <!-- 方便筛选出分布式压测时来自某台机器的请求 -->
+            <property name="jmeter.save.saveservice.hostname" value="true"/>
+            <!-- TimesVsThreads、ThroughputVsThreads监听器用到 -->
+            <property name="jmeter.save.saveservice.thread_counts" value="true"/>
+            <!-- Jenkins的Performance插件可能用到 -->
+            <property name="jmeter.save.saveservice.sample_count" value="true"/>
+            
+            <!-- 分布式压测设置 -->
+            <!-- 由于Ant的jmeter任务不支持script、if、condition等任务，${hosts}的值放在pre-run里定义 -->
+            <property name="remote_hosts" value="${hosts}"/>
+            
+            <!-- 具体测试相关，jmx文件里${__P(名字, 默认值)}定义，看情况添加/修改/删除 -->
+            <!-- 建议在properties文件/shell脚本/Jenkins定义同名属性，方便修改它们的值 -->
+            <property name="thread" value="${thread}" remote="true"/>
+            <property name="rampup" value="${rampup}" remote="true"/>
+            <property name="duration" value="${duration}" remote="true"/>
+            <property name="startup_delay" value="${startup_delay}" remote="true"/>
+            <property name="think_time" value="${think_time}" remote="true"/>
+
+            <property name="app_server" value="${app_server}" remote="true"/>
+            <property name="app_server_port" value="${app_server_port}" remote="true"/>
+            <property name="im_server" value="${im_server}" remote="true"/>
+            <property name="im_server_port" value="${im_server_port}" remote="true"/>
+        </jmeter>
+    </target>
+
+    <target name="pre-generate-report">
+        <!-- 把Saxon9-HE包拷到JMETER_HOME/lib（模板文件如果是XSLT 2.0，Ant默认的xalan包不支持） -->
+        <!--<copy file="${lib_dir}/saxon9he.jar" todir="${jmeter_home}/lib"/>-->
+    </target>
+
+    <!-- 生成html报告 -->
+    <target name="generate-report" depends="pre-generate-report">
+        <tstamp><format property="report.datestamp" pattern="yyyy/MM/dd HH:mm"/></tstamp>
+        <echo>Generating report at ${report.datestamp} ...</echo>
+        
+        <xslt
+            classpathref="xslt.classpath"
+            force="true"
+            in="${resultlog_dir}/${resultlog_filename}"
+            out="${output_dir}/${report_filename}"
+            style="${report_stylefile_path}"
+        >
+            <!-- saxon包必须有这段配置才正常工作。如果不用saxon，去掉factory这段 -->
+            <factory name="net.sf.saxon.TransformerFactoryImpl">
+                <attribute name="http://saxon.sf.net/feature/ignoreSAXSourceParser" 
+                            value="true"/>
+            </factory>
+            <!-- 传参数进去，仅用于显示 -->
+            <param name="titleReport" expression="${report_title}"/>
+            <param name="dateReport" expression="${report.datestamp}"/>
+
+            <param name="test_machine_num" expression="${test_machine_num}"/>
+            <param name="hosts" expression="${hosts}"/>
+            <param name="thread" expression="${thread}"/>
+            <param name="rampup" expression="${rampup}"/>
+            <param name="duration" expression="${duration}"/>
+            <param name="think_time" expression="${think_time}"/>
+        </xslt>
+        
+        <tstamp><format property="report.end.time" pattern="yyyy/MM/dd HH:mm"/></tstamp>
+        <echo>Report generated at ${report.end.time}</echo>
+    </target>
+    
+    <target name="pre-generate-chart">
+        <!-- 创建目录 -->
+        <mkdir dir="${chart_dir}"/>
+        <!-- 复制CMDRunner包到 $JMETER_HOME/lib/ext -->
+        <!-- <copy file="${lib_dir}/CMDRunner.jar" tofile="${jmeter_home}/lib/ext/CMDRunner.jar"/> -->
+    </target>
+
+    <!-- 生成性能报告图表 -->
+    <target name="generate-chart" depends="pre-generate-chart">
+        <!-- 可选的监听器和详细参数见：http://jmeter-plugins.org/wiki/JMeterPluginsCMD/
+        必须装完插件才能用 --> 
+        <for param="reportType" list="BytesThroughputOverTime,HitsPerSecond,LatenciesOverTime,PerfMon,ResponseCodesPerSecond,ResponseTimesDistribution,ResponseTimesOverTime,ResponseTimesPercentiles,ThreadsStateOverTime,ThroughputVsThreads,TimesVsThreads,TransactionsPerSecond">
+            <!-- 命令行参数不能加 aggregate-rows，上面有些监听器不支持 -->
+            <sequential>
+                <java  jar="${jmeter_home}/lib/ext/CMDRunner.jar" fork="true">
+                    <arg value="--tool"/>
+                    <arg value="Reporter"/>
+                    <arg value="--generate-png"/>
+                    <arg value="${chart_dir}/@{reportType}.png"/>
+                    <arg value="--input-jtl"/>
+                    <arg value="${resultlog_dir}/${resultlog_filename}"/>
+                    <arg value="--plugin-type"/>
+                    <arg value="@{reportType}"/>                        
+                    <arg value="--width"/>
+                    <arg value="800"/>
+                    <arg value="--height"/>
+                    <arg value="600"/>
+                </java>
+            </sequential>
+        </for>
+        <!-- 以下只支持保存为csv -->
+        <!-- AggregateReport 跟 SynthesisReport 出来的报告是同样内容，字段名比较难懂，除非没装插件才用它 -->
+        <for param="reportType" list="SynthesisReport">
+            <sequential>
+                <java  jar="${jmeter_home}/lib/ext/CMDRunner.jar" fork="true">
+                    <arg value="--tool"/>
+                    <arg value="Reporter"/>
+                    <arg value="--generate-csv"/>
+                    <arg value="${chart_dir}/@{reportType}.csv"/>
+                    <arg value="--input-jtl"/>
+                    <arg value="${resultlog_dir}/${resultlog_filename}"/>
+                    <arg value="--plugin-type"/>
+                    <arg value="@{reportType}"/>
+                </java>
+            </sequential>
+        </for>
+    </target>
+
+</project>

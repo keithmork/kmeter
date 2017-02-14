@@ -1,0 +1,36 @@
+#!/bin/bash
+
+# 载入公共配置
+source "$(dirname "$0")/../conf/omj_config.sh"
+
+# 检查JMETER_HOME环境变量
+if [[ -z "${JMETER_HOME}" ]]; then
+    echo "[ERROR] Cannot find environment variable JMETER_HOME" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 参数
+# ---------------------------------------------------------------------------
+# 不传参数会以GUI模式运行
+# GUI模式只应该用来调试，正式测试请用命令行
+
+# jmx脚本文件路径
+test_plan_file="$1"
+
+# 监听器设置，不传则使用默认（推荐）
+# 可选值有：
+# min （记录最少字段，但没法用JMeter的生成HTML报告的功能）
+# debug （记录最多字段，适合调试）
+# functional （保存成XML格式，用于功能测试）
+listener_config="$2"
+
+# ---------------------------------------------------------------------------
+# 运行
+# ---------------------------------------------------------------------------
+
+if [[ -n "${test_plan_file}" ]]; then
+    run_in_commandline "${test_plan_file}" "${listener_config}"
+else
+    run_in_gui
+fi
