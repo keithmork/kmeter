@@ -1,0 +1,56 @@
+#!/bin/bash
+
+# JMETER_HOME环境变量是否定义
+if [[ -z "${JMETER_HOME}" ]]; then
+    echo "[ERROR] Cannot find environment variable JMETER_HOME" >&2
+    exit 1
+fi
+
+# JMeter启动脚本
+readonly JMETER="${JMETER_HOME}/bin/jmeter"
+
+# JMeter启动脚本是否存在
+if [[ ! -f "${JMETER}" ]]; then
+    echo "[ERROR] Cannot find JMeter executable: ${JMETER}"
+    echo "Please check your JMETER_HOME environment variable!"
+    exit 1
+fi
+
+# 参数
+readonly args=("$@")
+
+# 帮助
+if [[ -z "$1" ]] || [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
+    echo "Usage: generate_html_dashboard result_log_file [other_jmeter_args]"
+    exit
+fi
+
+# 当前脚本所在目录
+[[ "$(dirname "$0")" == "." ]] && readonly script_dir="$(pwd)" \
+    || readonly script_dir="$(dirname "$0")"
+
+# 要解析的测试结果文件
+# 必须为csv格式，保存了足够的字段（JMeter 3.1+默认配置，或oh-my-jmeter的 default 和 debug）
+readonly result_log_file="$1"
+
+# 输出目录（结果文件同目录）
+readonly output_dir="$(dirname "$1")"
+
+# HTML报告输出目录，JMeter要求必须不存在或为空
+[[ -d "${output_dir}/dashboard" ]] && readonly dashboard_dir="${output_dir}/dashboard_$(date +%Y%m%d_%H%M%S)" \
+    || readonly dashboard_dir="${output_dir}/dashboard"
+
+# 生成报告
+"${JMETER}" -g "${result_log_file}" \
+    -o "${dashboard_dir}" \
+    -j "${output_dir}/generate_report.log" \
+    -q "${script_dir}/../../conf/user.properties" \
+    "${args[@]:1}"
+
+# 生成的文件是否存在
+if [[ -f "${dashboard_dir}/index.html" ]]; then
+    echo "SUCCESS"
+    echo "See: ${dashboard_dir}/index.html"
+else
+    echo "FAILED"
+fi

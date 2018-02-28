@@ -1,36 +1,186 @@
 #!/bin/bash
 
-# 载入公共配置
-source "$(dirname "$0")/../conf/omj_config.sh"
+# 系统环境变量里必须已设置好JMETER_HOME，值为JMeter所在目录，不要带空格或特殊字符
+# 也可以在这里定义：
+#readonly JMETER_HOME="/usr/local/jmeter"
 
-# 检查JMETER_HOME环境变量
+readonly ARGS=("$@")
+
+
+if [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
+    echo "Usage: $0 [TEST_PLAN_FILE] [*args]"
+    echo "Example: "
+    echo "- GUI mode: $0"
+    echo "- command line mode: $0 /path/to/test.jmx"
+    exit
+fi
+
 if [[ -z "${JMETER_HOME}" ]]; then
     echo "[ERROR] Cannot find environment variable JMETER_HOME" >&2
     exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# 参数
-# ---------------------------------------------------------------------------
-# 不传参数会以GUI模式运行
-# GUI模式只应该用来调试，正式测试请用命令行
+readonly JMETER_EXEC="${JMETER_HOME}/bin/jmeter"
+if [[ ! -f "${JMETER_EXEC}" ]]; then
+    echo "[ERROR] Cannot find JMeter executable: ${JMETER_EXEC}"
+    echo "Please make sure the path in your JMETER_HOME environment variable is correct!"
+    exit 1
+fi
 
-# jmx脚本文件路径
-test_plan_file="$1"
+readonly JMETER_VERSION="$("${JMETER_EXEC}" -j /dev/null --version | tail -n 4 | head -n 1 | awk '{print $(NF-1),$NF}')"
+if [[ "${JMETER_VERSION:0:1}" -lt 3 ]]; then
+    echo "JMeter version must be 3.0 or above. Current version: ${JMETER_VERSION}"
+    exit 1
+else
+    echo "JMeter version: ${JMETER_VERSION}"
+fi
 
-# 监听器设置，不传则使用默认（推荐）
-# 可选值有：
-# min （记录最少字段，但没法用JMeter的生成HTML报告的功能）
-# debug （记录最多字段，适合调试）
-# functional （保存成XML格式，用于功能测试）
-listener_config="$2"
 
 # ---------------------------------------------------------------------------
-# 运行
+# oh-my-jmeter默认配置
 # ---------------------------------------------------------------------------
 
-if [[ -n "${test_plan_file}" ]]; then
-    run_in_commandline "${test_plan_file}" "${listener_config}"
+# oh-my-jmeter家目录（脚本所在目录的上级目录）
+if [[ -n "$(uname -a | grep "Darwin")" ]]; then  # Mac
+    [[ "$(dirname "$0")" == "." ]] && BASE_DIR="$(dirname "$(pwd)")" || BASE_DIR="$(dirname "$(dirname "$0")")"
+    [[ "${BASE_DIR}" == ".." ]] && BASE_DIR="$(dirname "$(pwd)")"
+else  # Linux
+    BASE_DIR="$(dirname "$(dirname "$(readlink -f "$0")")")"
+fi
+
+# 配置文件目录
+readonly CONFIG_DIR="${BASE_DIR}/conf"
+# JMeter用户自定义配置文件
+readonly GENERAL_CONFIG_FILE="${CONFIG_DIR}/general.properties"
+readonly SAVE_RESULT_CONFIG_FILE="${CONFIG_DIR}/save_result.properties"
+readonly REMOTE_TESTING_CONFIG_FILE="${CONFIG_DIR}/remote.properties"
+
+# 库目录
+readonly LIB_DIR="${BASE_DIR}/lib"
+# JMeter插件目录
+readonly PLUGIN_DIR="${BASE_DIR}/lib/ext"
+
+# 存放用户自己的文件的目录
+readonly USER_FILE_DIR="${BASE_DIR}/user_file"
+# 测试计划（JMeter脚本）目录
+readonly TEST_PLAN_DIR="${USER_FILE_DIR}/test_plan"
+# 测试计划需要的数据文件目录
+readonly DATA_DIR="${USER_FILE_DIR}/data"
+# 测试计划需要的外部脚本文件目录
+readonly SCRIPT_DIR="${USER_FILE_DIR}/script"
+# 保存响应内容的目录
+readonly BODY_DIR="${USER_FILE_DIR}/body"
+
+# 测试报告／日志输出目录
+readonly REPORT_DIR="${BASE_DIR}/report"
+
+[[ ! -d "${REPORT_DIR}" ]] && mkdir -p "${REPORT_DIR}"
+
+
+# ---------------------------------------------------------------------------
+# JVM参数（覆盖JMeter启动脚本的设置）
+# ---------------------------------------------------------------------------
+# 默认JVM参数见 ${JMETER_HOME}/bin/jmeter
+# 如果被测后台服务是Java（或Scala等基于JVM的语言）写的，推荐把JVM参数设成跟被测程序保持一致
+
+readonly server="-server"
+
+readonly heap="-Xms1g -Xmx1g -XX:MaxMetaspaceSize=256m"
+
+readonly general="-Djava.net.preferIPv4Stack=true -XX:-UseBiasedLocking -XX:AutoBoxCacheMax=20000"
+
+# G1GC
+readonly gc="-XX:+UseG1GC -XX:MaxGCPauseMillis=100 -XX:G1ReservePercent=20"
+# CMS
+# local gc="-XX:+UseConcMarkSweepGC -XX:CMSInitiatingOccupancyFraction=75 -XX:+UseCMSInitiatingOccupancyOnly -XX:MaxTenuringThreshold=2 -XX:+ExplicitGCInvokesConcurrent -XX:+ParallelRefProcEnabled"
+
+readonly verbose_gc="-XX:+PrintGC -XX:+PrintGCDetails -XX:+PrintGCTimeStamps -XX:+PrintGCDateStamps -XX:+PrintGCCause -XX:+PrintTenuringDistribution -XX:+PrintHeapAtGC -XX:+PrintGCApplicationConcurrentTime -XX:+PrintAdaptiveSizePolicy -XX:+PrintGCApplicationStoppedTime -XX:+PrintPromotionFailure"
+readonly gc_log="-Xloggc:${REPORT_DIR}/gc.log -XX:+UseGCLogFileRotation -XX:NumberOfGCLogFiles=10 -XX:GCLogFileSize=10M"
+
+readonly dump="-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=${REPORT_DIR} -XX:ErrorFile=${REPORT_DIR}/hotspot_err_%p.log"
+
+readonly use_utf8="-Dfile.encoding=UTF-8 -Dsun.jnu.encoding=UTF-8"
+readonly system_props="-Djava.security.egd=file:/dev/urandom"
+
+#readonly debug="-XX:+PrintCommandLineFlags"
+
+readonly _JVM_ARGS="${server} ${heap} ${gc} ${verbose_gc} ${gc_log} ${dump} ${use_utf8} ${system_props} ${debug}"
+
+
+# ---------------------------------------------------------------------------
+# JMeter参数
+# ---------------------------------------------------------------------------
+# 参数说明 http://jmeter.apache.org/usermanual/get-started.html#options
+
+function get_omj_props() {
+    local jmeter_props="-Juser.classpath=${LIB_DIR} -Jsearch_paths=${PLUGIN_DIR} \
+        -Jincludecontroller.prefix=${TEST_PLAN_DIR}/ \
+        -q ${GENERAL_CONFIG_FILE} -G${GENERAL_CONFIG_FILE} \
+        -q ${SAVE_RESULT_CONFIG_FILE} -G${SAVE_RESULT_CONFIG_FILE} \
+        -q ${REMOTE_TESTING_CONFIG_FILE} -G${REMOTE_TESTING_CONFIG_FILE}"
+
+    # http://jmeter.apache.org/usermanual/get-started.html#classpath
+
+    # includecontroller.prefix 测试计划需要引用外部JMeter脚本文件（.jmx）的默认路径
+    # 指定的路径必须用 / 结尾，因为测试计划里都写相对路径（开头什么也不加）
+    # http://jmeter.apache.org/usermanual/component_reference.html#Include_Controller
+    # http://jmeter.apache.org/usermanual/properties_reference.html#include_controller
+
+    local custom_props="-Jomj.testPlanDir=${TEST_PLAN_DIR} -Jomj.dataDir=${DATA_DIR} \
+        -Jomj.scriptDir=${SCRIPT_DIR} -Jomj.libDir=${LIB_DIR} \
+        -Jomj.baseDir=${BASE_DIR} -Jomj.bodyDir=${BODY_DIR}"
+
+    readonly OMJ_PROPS="${jmeter_props} ${custom_props}"
+}
+
+
+function run_in_command_line() {
+    local test_plan_file="$1"
+
+    local test_name="$(basename "${test_plan_file}" | cut -d "." -f 1)"
+    local start_time="$(date +%Y%m%d_%H%M%S)"
+    local output_dir="${REPORT_DIR}/${test_name}__${start_time}"
+
+    [[ ! -d "${output_dir}" ]] && mkdir -p "${output_dir}"
+
+    get_omj_props
+
+    JVM_ARGS="${_JVM_ARGS}" "${JMETER_EXEC}" -n -t "${test_plan_file}" \
+        -j "${output_dir}/jmeter.log" -l "${output_dir}/result.csv" -e -o "${output_dir}/dashboard" \
+        ${OMJ_PROPS} ${ARGS[@]:1} | tee -a "${output_dir}/summary.log"
+
+    echo
+    echo "[INFO] See logs and reports at: ${output_dir}"
+
+}
+
+
+function run_in_gui() {
+    get_omj_props
+
+    pushd "${TEST_PLAN_DIR}" > /dev/null
+    JVM_ARGS="${_JVM_ARGS}" "${JMETER_EXEC}" -j "${REPORT_DIR}/jmeter-gui.log" ${OMJ_PROPS}
+    popd > /dev/null
+}
+
+
+function pass_all_params_to_jmeter() {
+    get_omj_props
+    JVM_ARGS="${_JVM_ARGS}" "${JMETER_EXEC}" ${ARGS[@]} ${OMJ_PROPS}
+}
+
+
+# ---------------------------------------------------------------------------
+# 运行测试
+# ---------------------------------------------------------------------------
+
+# 有传参数用命令行运行，无参数用GUI运行
+if [[ -n "$1" ]]; then
+    if [[ -f "$1" ]]; then
+        run_in_command_line "$1"
+    else
+        pass_all_params_to_jmeter
+    fi
 else
     run_in_gui
 fi

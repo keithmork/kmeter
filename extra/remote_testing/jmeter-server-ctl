@@ -1,0 +1,133 @@
+#!/bin/bash
+
+readonly GREP_KEYWORD="jmeter-server"
+
+# 当前脚本所在目录
+[[ "$(dirname "$0")" == "." ]] && readonly SCRIPT_DIR="$(pwd)" \
+    || readonly SCRIPT_DIR="$(dirname "$0")"
+
+# ========== 函数 ==========
+
+function show_process() {
+    # 排除grep和当前脚本名（往往带有关键字）
+    ps aux | grep "${GREP_KEYWORD}" | grep -v "grep" | grep -v "$(basename "$0")"
+}
+
+function get_pid() {
+    pid="$(show_process | awk '{print $2}')"
+}
+
+# 检查程序有没有装、环境变量有没有设之类
+function check_env() {
+    if [[ -z "${JMETER_HOME}" ]]; then
+        echo "[ERROR] Cannot find JMETER_HOME environment variable!" > 2
+        exit 1
+    fi
+}
+
+# 启动程序需要做的具体操作
+function start_app() {
+    [[ "$(dirname "$0")" == "." ]] && local script_dir="$(pwd)" \
+        || local script_dir="$(dirname "$0")"
+    local base_dir="${script_dir}/../.."
+    local lib_dir="${base_dir}/lib"
+    local report_dir="${base_dir}/result"
+
+    [[ ! -d "${report_dir}" ]] && mkdir "${report_dir}"
+
+    # 如果遇上这错误：
+    # ERROR - jmeter.engine.ClientJMeterEngine: java.rmi.ConnectException: Connection refused to host: 127.0.0.1
+    # 加上 -Djava.rmi.server.hostname=xxx.xxx.xxx.xxx
+    ${JMETER_HOME}/bin/jmeter -s -j "${report_dir}/jmeter-server.log" \
+        "-Juser.classpath=${lib_dir}/ext:${lib_dir}:${JMETER_HOME}/lib/ext:${JMETER_HOME}/lib" \
+        "-Jsearch_paths=${lib_dir}/ext" \
+        "-Jincludecontroller.prefix=${base_dir}/user_file/testplan/" \
+        -q "${base_dir}/conf/user.properties" \
+        -Dserver_port=${SERVER_PORT:-1099} > "${report_dir}/jmeter-server-service.log" 2>&1 &
+}
+
+# 关闭程序需要做的具体操作
+function stop_app() {
+    get_pid
+    if [[ -n "${pid}" ]]; then
+        kill -9 ${pid}
+    fi
+}
+
+# ========== 下面都是套路 ==========
+
+function status() {
+    sleep 1
+    get_pid
+    if [[ -z "$pid" ]]; then
+        echo "Status: not running"
+    else
+        echo "Status: running  PID: ${pid}"
+        echo "Details:"
+        show_process
+    fi
+}
+
+function start() {
+    get_pid
+    if [[ -z "$pid" ]]; then
+        check_env
+        echo "STARTING..."
+        start_app
+        if [[ "$?" -eq 0 ]]; then
+            echo "SUCCESS"
+            status
+        else
+            echo "FAILED"
+            exit 1
+        fi
+    else
+        status
+    fi
+}
+
+function stop() {
+    get_pid
+    if [[ -z "$pid" ]]; then
+        status
+    else
+        echo "STOPPING..."
+        stop_app
+        if [[ "$?" -eq 0 ]]; then
+            echo "SUCCESS"
+            status
+        else
+            echo "FAILED"
+            exit 1
+        fi
+    fi
+}
+
+function main() {
+    # 判断命令行参数个数
+    if [[ "$#" -eq 0 ]]; then
+        param="help"
+    else
+        param=$1
+    fi
+
+    case "${param}" in
+        "start")
+            start
+            ;;
+        "stop")
+            stop
+            ;;
+        "restart")
+            stop
+            start
+            ;;
+        "status")
+            status
+            ;;
+        *) echo "Usage: $0 start | stop | restart | status"
+    esac
+}
+
+
+main "$@"
