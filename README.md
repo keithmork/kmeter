@@ -1,1 +1,1 @@
-# oh-my-jmeter
+# KMeter
